@@ -175,6 +175,60 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 
 导入的内容只是草稿：仍需在编辑台为每个事件**选定主张**、通过现有「校验能否发布」（含先后关系求解）后正式发布，访客才能看到。
 
+### 按出处原文撤回公开展示（出处遮盖，预览 → 确认）
+
+受访人或档案方要求撤回某条出处的公开展示时，编辑者可按**出处原文**精确遮盖。适用于已发布快照中**事件主张的出处**与**「先于」关系的出处**：
+
+1. **预览（只读）**：在编辑台「按出处原文撤回公开展示」卡片粘贴**非空的精确出处文本**（须与快照中的出处逐字相同；首尾空白会被去除，部分包含不命中），或调用 `POST /api/editor/redaction-preview`。返回该文本在**全部已发布版本**中命中的位置与数量（按版本列出事件主张命中与关系命中）、当前最新版本号 `currentVersionNo`；另附草稿区同文本条数供参考。预览不写任何数据。
+2. **确认遮盖**：`POST /api/editor/redaction`，必须提交原文与预览时的**最新版本号** `currentVersionNo`。系统只在 `source_redactions` 表**追加登记该文本**：
+
+   - **不改写任何历史快照或草稿**（版本快照表里的 `source` 原文原样保留）；
+   - 访客读取**最新年表**或**指定历史版本**时，命中位置的 `source` 一律显示为统一的 **「出处已遮盖」**，其余字段（标题、日期、区间、求解日期、考异等）与版本号不变；
+   - **以后发布含同一文本的新版本也自动遮盖**（读出时动态比对登记文本，无需逐版处理）；
+   - 持编辑口令查看版本详情（`GET /api/editor/versions/:no/raw`、编辑台「查看该版快照原文」）**仍显示原文**；**从历史版本恢复草稿也使用原文**；
+   - 遮盖登记不推进草稿修订号，与恢复 / 导入的并发控制互不影响。
+3. **冲突与幂等**：预览后若有人发布了新版本（最新版本号变化），确认返回 **409** `VERSION_CONFLICT` 且**不落库**，需重新预览再确认；空 / 纯空白文本返回 **400**；同一文本**重复确认**返回 **200** 且 `alreadyRedacted: true`（已遮盖状态与当前命中数量，不重复登记）。
+
+   ```bash
+   TOKEN=editor
+   SRC='李宝山口述，2021-07-05 访谈'
+
+   # 1) 只读预览：命中位置与数量 + 最新版本号
+   curl -s -X POST http://localhost:3000/api/editor/redaction-preview \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+     -d "{\"source\":\"$SRC\"}"
+   # => {"ok":true,"source":"李宝山口述…","alreadyRedacted":false,
+   #     "currentVersionNo":2,"versionCount":2,
+   #     "totalEventHitCount":3,"totalRelationHitCount":2,"totalHitCount":5,
+   #     "versions":[{"versionNo":1,"eventHitCount":1,"relationHitCount":1,
+   #                  "eventHits":[{"eventId":1,"title":"动员会",...}],
+   #                  "relationHits":[{"relationId":1,"earlierEventId":1,"laterEventId":2}]},
+   #                 {"versionNo":2,...}],
+   #     "draft":{"claimHitCount":0,"relationHitCount":0,...}}
+
+   # 2) 携预览返回的最新版本号确认（示例用 jq 取号）
+   PREVIEW=$(curl -s -X POST http://localhost:3000/api/editor/redaction-preview \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+     -d "{\"source\":\"$SRC\"}")
+   curl -s -X POST http://localhost:3000/api/editor/redaction \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+     -d "{\"source\":\"$SRC\",
+          \"currentVersionNo\":$(echo "$PREVIEW" | jq .currentVersionNo),
+          \"editor\":\"志愿者小王\"}"
+   # => {"ok":true,"alreadyRedacted":false,"redactedLabel":"出处已遮盖",
+   #     "currentVersionNo":2,"totalHitCount":5,...}
+
+   # 3) 访客视图：命中处显示「出处已遮盖」（最新年表与任一历史版本皆然）
+   curl -s http://localhost:3000/api/public/chronicle | jq '.version.events[].source'
+   curl -s http://localhost:3000/api/public/versions/1 | jq '.version.relations[].source'
+
+   # 4) 持口令的版本原文不变
+   curl -s -H "X-Editor-Token: $TOKEN" \
+     http://localhost:3000/api/editor/versions/1/raw | jq '.version.events[].source'
+   ```
+
+   完整可运行的调用示例见 `examples/redaction-example.sh`（自动建草稿、发布两版、预览、确认、核对访客视图与原文视图）。
+
 ### 两名编辑者并发修改（版本冲突）
 
 发布请求必须带 `baseVersionNo`（编辑台打开时自动记录当前最新版本号）。若两名编辑者都从第 N 版开始改，第一人发布产生第 N+1 版后，第二人仍以 `baseVersionNo=N` 提交时：
@@ -187,12 +241,15 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 
 只渲染最新已发布版本：按系统确定的日期排列的时间线、每条事件所选主张的精度与出处、全部「先于」关系及其出处。草稿、未发布主张、未发布关系均不出现在任何公开接口中。尚无发布版本时仅显示「尚未发布」。
 
+凡编辑者已按出处原文登记遮盖的位置，访客在最新年表与任一历史版本中都只看到 **「出处已遮盖」**（快照原文仍在库中，仅持编辑口令的接口可查看）。
+
 ## 数据与备份
 
 - 单文件 SQLite 数据库：容器中位于 `/app/data/chronicle.db`（Docker 卷 `chronicle-data`），本机直跑位于 `./data/chronicle.db`。
 - 备份：停止写入后复制该 `.db` 文件即可（或使用 SQLite 的 `.backup` 命令）。
 - 历史版本表 `versions / version_events / version_relations` 只追加、不更新不删除，保证不可变。
 - 导入批次表 `import_batches` 记录每次成功导入的批次标识与内容指纹，用于防止同一批次重复导入。
+- 出处遮盖表 `source_redactions` 同样只追加：只存被遮盖的精确出处文本，**不回写快照或草稿**；删除该表对应行即恢复公开显示。
 
 ## 目录结构
 
@@ -206,18 +263,19 @@ src/
   publish.js    发布事务：再校验 + 版本冲突检查 + 写不可变快照
   restore.js    恢复草稿：只读预览 + 原子替换事务（修订号/版本号冲突检查、按快照重建）
   bundle.js     采访整理包导入：整包校验 + 内容指纹 + 只读预览 + 事务追加（批次防重/修订号冲突检查）
+  redact.js     出处遮盖：精确出处文本的只读命中预览 + 只追加登记（版本号冲突检查）；公开读出层动态替换为「出处已遮盖」
   seed.js       演示数据
 public/         访客页与编辑台（原生 HTML/CSS/JS）
-examples/       采访整理包 JSON 示例
-test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复、整理包导入）
+examples/       采访整理包 JSON 示例；出处遮盖 curl 调用示例
+test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复、整理包导入、出处遮盖）
 ```
 
 ## 主要 HTTP API
 
 公开（无口令）：
 
-- `GET /api/public/chronicle` — 最新已发布版本完整快照
-- `GET /api/public/versions` / `GET /api/public/versions/:no` — 版本清单 / 指定版本
+- `GET /api/public/chronicle` — 最新已发布版本完整快照（命中遮盖登记的 `source` 显示「出处已遮盖」）
+- `GET /api/public/versions` / `GET /api/public/versions/:no` — 版本清单 / 指定版本（指定版本同样应用遮盖）
 
 编辑（需请求头 `X-Editor-Token`）：
 
@@ -238,3 +296,11 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
 - `POST /api/editor/import` — 确认导入；体含 `bundle`（原包）、`fingerprint`、`draftRevisionNo`（后两者取预览返回值）
   - 201：`{batchId, revisionNo, counts, idMap:{events:[{key,eventId,claimIds}], relations:[{earlierKey,laterKey,relationId}]}}`（一个事务追加整包）
   - 409：`{code:"BUNDLE_CONTENT_MISMATCH"|"DRAFT_REVISION_CONFLICT"|"BATCH_ALREADY_IMPORTED", ...}`（内容被替换 / 草稿已变化 / 批次已导入，均不写入）；参数非法 400
+- `POST /api/editor/redaction-preview` — 出处遮盖只读预览；体含非空 `source`（精确出处原文，首尾空白去除），返回全部已发布版本的命中位置/数量、`currentVersionNo` 与草稿区参考计数
+  - 200：`{source, alreadyRedacted, currentVersionNo, versionCount, totalEventHitCount, totalRelationHitCount, totalHitCount, versions:[{versionNo,eventHitCount,relationHitCount,eventHits:[{eventId,title,sortOrder}],relationHits:[{relationId,earlierEventId,laterEventId,sortOrder}]}], draft:{claimHitCount,relationHitCount,...}}`
+  - 400：空 / 纯空白 / 非字符串文本
+- `POST /api/editor/redaction` — 确认遮盖（只追加登记，不改写快照或草稿）；体含 `source`、`currentVersionNo`（取预览返回值）、可选 `editor`
+  - 200：`{alreadyRedacted:false, redactedLabel:"出处已遮盖", redactedAt, ...命中统计}`；重复确认 200 且 `alreadyRedacted:true`（不重复登记）
+  - 409：`{code:"VERSION_CONFLICT", currentVersionNo, expectedVersionNo, ...}`（预览后发布了新版本，不落库）；空文本或版本号非法 400
+- `GET  /api/editor/redactions` — 已登记遮盖清单（编辑者视角，含出处原文与登记时间）
+- `GET  /api/editor/versions/:no/raw` — 指定版本快照**原文**（持编辑口令，不应用遮盖；恢复草稿亦用原文）

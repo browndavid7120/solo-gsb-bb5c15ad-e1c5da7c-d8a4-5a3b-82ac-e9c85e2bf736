@@ -66,6 +66,11 @@ button.secondary { background: transparent; color: var(--accent-dark); }
 button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
 button.danger:hover { background: var(--danger-bg); }
 button:disabled { opacity: .5; cursor: not-allowed; }
+button.linkbtn {
+  background: none; border: none; color: var(--accent-dark);
+  padding: 0; font-size: inherit; text-decoration: underline; border-radius: 0;
+}
+button.linkbtn:hover { background: none; }
 
 input[type=text], input[type=number], input[type=password], input[type=date], select, textarea {
   font-family: inherit;

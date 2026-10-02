@@ -34,6 +34,7 @@ let conflictData = null;
 let restorePreview = null; // 恢复草稿预览（确认时提交其中的修订号/最新版本号）
 let bundleParsed = null;   // 解析后的整理包原包（确认时原样提交）
 let bundlePreview = null;  // 导入预览（确认时提交其中的指纹/草稿修订号）
+let redactPreview = null;  // 出处遮盖预览（确认时提交其中的最新版本号）
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -203,7 +204,10 @@ async function loadVersions() {
             <button class="secondary" type="button" data-restore-version="${v.versionNo}" style="padding:2px 10px;font-size:13px">预览并恢复草稿</button>
           </div>
           ${v.note ? `<div>${esc(v.note)}</div>` : ''}
-          <div><a href="/api/public/versions/${v.versionNo}" target="_blank">查看该版快照 JSON</a></div>
+          <div>
+            <button class="linkbtn" type="button" data-raw-version="${v.versionNo}">查看该版快照原文（编辑者，不遮盖）</button>
+            · <a href="/api/public/versions/${v.versionNo}" target="_blank">访客视角 JSON（遮盖后）</a>
+          </div>
         </div>`).join('')
     : '尚无版本。';
 }
@@ -547,6 +551,134 @@ async function confirmBundleImport() {
   }
 }
 
+// ---------- 按出处原文撤回公开展示（预览 → 确认） ----------
+function showRedactMsg(kind, html) {
+  $('#redactMsg').innerHTML = `<div class="alert ${kind}">${html}</div>`;
+}
+
+function redactHitsHtml(data) {
+  const perVersion = data.versions.length
+    ? data.versions.map((v) => {
+        const evs = v.eventHits.map((h) => `<li>事件「${esc(h.title)}」（事件主张，eventId ${h.eventId}）</li>`).join('');
+        const rels = v.relationHits
+          .map((h) => `<li>先于关系 ${h.earlierEventId} → ${h.laterEventId}（relationId ${h.relationId}）</li>`)
+          .join('');
+        return `
+          <div class="rel-line">
+            <strong>第 ${v.versionNo} 版</strong>
+            <span class="badge prec">事件主张 ${v.eventHitCount} 处</span>
+            <span class="badge prec">先于关系 ${v.relationHitCount} 处</span>
+            ${v.totalHitCount ? `<ul class="error-list" style="margin:4px 0">${evs}${rels}</ul>` : '<div class="muted">本版无命中</div>'}
+          </div>`;
+      }).join('')
+    : '<p class="muted">尚无已发布版本（没有可遮盖的公开内容）。</p>';
+
+  const d = data.draft;
+  const draftHtml = d
+    ? `<p class="muted">另：当前草稿中有 ${d.claimHitCount} 条未发布主张、${d.relationHitCount} 条未发布关系使用同一文本；
+       它们不在本次公开命中范围内，但<b>以后发布时会自动遮盖</b>（草稿与恢复草稿始终保留原文）。</p>`
+    : '';
+
+  return `
+    ${data.alreadyRedacted ? '<div class="alert warn">该出处文本此前已确认遮盖，重复确认将直接返回已遮盖状态（不重复落库）。</div>' : ''}
+    <p>出处原文：<code>${esc(data.source)}</code></p>
+    <p>
+      <span class="badge prec">已发布版本 ${data.versionCount} 个</span>
+      <span class="badge prec">事件主张命中 ${data.totalEventHitCount} 处</span>
+      <span class="badge prec">先于关系命中 ${data.totalRelationHitCount} 处</span>
+      <span class="badge">合计 ${data.totalHitCount} 处</span>
+    </p>
+    ${draftHtml}
+    <div style="max-height:240px;overflow:auto">${perVersion}</div>
+    <p class="muted" style="margin-top:10px">预览基准：当前最新版本号 <b>${data.currentVersionNo}</b>。
+      确认后不改写历史快照或草稿；访客读最新年表或任一历史版本时，命中处出处统一显示<b>「出处已遮盖」</b>，
+      其余字段与版本号不变。预览后若已发布新版本，确认将报冲突且不落库。</p>
+    <div id="redactDialogMsg"></div>`;
+}
+
+async function previewRedaction() {
+  const source = $('#redactSource').value;
+  if (!source.trim()) { showRedactMsg('error', '出处原文不能为空，请输入要撤回的精确出处文本。'); return; }
+  try {
+    const data = await api('POST', '/api/editor/redaction-preview', { source });
+    redactPreview = data;
+    $('#redactBody').innerHTML = redactHitsHtml(data);
+    $('#redactConfirm').disabled = false;
+    $('#redactDialog').showModal();
+  } catch (err) {
+    if (err.message === 'unauthorized') return;
+    showRedactMsg('error', esc(err.message));
+  }
+}
+
+async function confirmRedaction() {
+  if (!redactPreview) return;
+  const btn = $('#redactConfirm');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/editor/redaction', {
+      source: redactPreview.source,
+      currentVersionNo: redactPreview.currentVersionNo,
+      editor: store.editor || '匿名编辑',
+    });
+    $('#redactDialog').close();
+    redactPreview = null;
+    showRedactMsg('ok',
+      data.alreadyRedacted
+        ? `该出处<b>已处于遮盖状态</b>（此前已确认，未重复落库）：当前共遮盖 ${data.totalHitCount} 处公开位置。`
+        : `已确认遮盖：访客读取最新年表或任一历史版本时，${data.totalHitCount} 处命中位置的出处统一显示
+           <b>「出处已遮盖」</b>（事件主张 ${data.totalEventHitCount} 处、先于关系 ${data.totalRelationHitCount} 处）；
+           历史快照、草稿与版本号均未改动，以后发布含同一文本的版本也自动遮盖。
+           <a href="/" target="_blank">打开访客年表查看效果</a>`);
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#redactDialog').close(); return; }
+    const box = $('#redactDialogMsg');
+    if (err.status === 409) {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}<br>
+        <span class="muted">未做任何改动。请关闭本框后重新「预览命中位置」。</span></div>`;
+      btn.disabled = true;
+    } else {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  }
+}
+
+// ---------- 版本原文（持口令，不遮盖） ----------
+async function openRawVersion(versionNo) {
+  $('#rawVersionNo').textContent = versionNo;
+  $('#rawVersionBody').textContent = '加载中…';
+  $('#rawVersionDialog').showModal();
+  try {
+    const data = await api('GET', `/api/editor/versions/${versionNo}/raw`);
+    const v = data.version;
+    const titleById = new Map(v.events.map((e) => [e.eventId, e.title]));
+    const evs = v.events.map((e) => `
+      <div class="rel-line">
+        <strong>${esc(e.title)}</strong> <span class="badge">${esc(e.dateLabel)}</span>
+        <div class="source"><b>出处原文：</b>${esc(e.source || '（未注明）')}</div>
+        ${e.claimNote ? `<div class="muted">${esc(e.claimNote)}</div>` : ''}
+      </div>`).join('');
+    const rels = v.relations.length
+      ? v.relations.map((r) => `
+          <div class="rel-line">
+            <strong>${esc(titleById.get(r.earlierEventId) || '#' + r.earlierEventId)}</strong>
+            <span class="badge">先于</span>
+            <strong>${esc(titleById.get(r.laterEventId) || '#' + r.laterEventId)}</strong>
+            ${r.source ? `<div class="source"><b>出处原文：</b>${esc(r.source)}</div>` : ''}
+          </div>`).join('')
+      : '<p class="muted">（无先于关系）</p>';
+    $('#rawVersionBody').innerHTML = `
+      <p class="muted">${v.eventCount} 个事件、${v.relationCount} 条关系 · 发布于 ${esc(v.publishedAt)} UTC。
+        以下为快照<b>原文</b>；访客公开接口中命中遮盖登记的出处会显示「出处已遮盖」。</p>
+      <h3 style="font-size:13px">事件与被选主张</h3>${evs}
+      <h3 style="font-size:13px;margin-top:10px">「先于」关系</h3>${rels}`;
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#rawVersionDialog').close(); return; }
+    $('#rawVersionBody').innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+  }
+}
+
 // ---------- 事件委托：增删改 ----------
 async function onClick(e) {
   const t = e.target;
@@ -577,6 +709,13 @@ async function onClick(e) {
   if (t.id === 'btnBundlePreview') return previewBundleImport();
   if (t.id === 'bundleCancel') { $('#bundleDialog').close(); bundleParsed = null; bundlePreview = null; return; }
   if (t.id === 'bundleConfirm') return confirmBundleImport();
+
+  if (t.id === 'btnRedactPreview') return previewRedaction();
+  if (t.id === 'redactCancel') { $('#redactDialog').close(); redactPreview = null; return; }
+  if (t.id === 'redactConfirm') return confirmRedaction();
+  if (t.id === 'rawVersionClose') { $('#rawVersionDialog').close(); return; }
+  const rawVersion = t.dataset && t.dataset.rawVersion;
+  if (rawVersion !== undefined) return openRawVersion(Number(rawVersion));
 
   const addEvent = t.dataset && t.dataset.addEvent !== undefined;
   if (t.id === 'btnAddEvent') {

@@ -62,6 +62,21 @@
       <div id="bundleMsg" style="margin-top:10px"></div>
     </div>
 
+    <div class="card">
+      <h2>按出处原文撤回公开展示（出处遮盖）</h2>
+      <p class="muted">
+        输入<b>非空的精确出处文本</b>（与快照中的出处逐字相同才命中），先<b>只读预览</b>它在
+        <b>全部已发布版本</b>的事件主张与「先于」关系中命中的位置与数量，再携预览时的最新版本号确认。
+        确认后<b>不改写历史快照或草稿</b>：访客读取最新年表或任一历史版本时，命中位置的出处统一显示
+        <b>「出处已遮盖」</b>，其余字段与版本号不变；以后发布含同一文本的版本也自动遮盖。
+        持口令在版本详情与恢复草稿中仍可查看、使用原文。预览后若已发布新版本，确认会报冲突且不落库。
+      </p>
+      <label>精确出处原文</label>
+      <textarea id="redactSource" rows="2" placeholder="如：李宝山口述，2021-07-05 访谈，录音 03 段 08:12"></textarea>
+      <div style="margin-top:8px"><button id="btnRedactPreview" type="button" class="secondary">预览命中位置（只读）</button></div>
+      <div id="redactMsg" style="margin-top:10px"></div>
+    </div>
+
     <div class="grid2">
       <section>
         <div class="card">
@@ -130,6 +145,25 @@
     <div class="d-foot">
       <button class="secondary" id="bundleCancel" type="button">取消</button>
       <button id="bundleConfirm" type="button">确认导入整包</button>
+    </div>
+  </dialog>
+
+  <!-- 出处遮盖确认对话框 -->
+  <dialog id="redactDialog">
+    <div class="d-head" style="background:#fbeaea;color:#a33;border-color:#e0b8b8">▣ 预览出处遮盖（撤回公开展示）</div>
+    <div class="d-body" id="redactBody">加载预览中…</div>
+    <div class="d-foot">
+      <button class="secondary" id="redactCancel" type="button">取消</button>
+      <button id="redactConfirm" type="button">确认遮盖：访客视图统一显示「出处已遮盖」</button>
+    </div>
+  </dialog>
+
+  <!-- 版本原文对话框（持口令，不遮盖） -->
+  <dialog id="rawVersionDialog">
+    <div class="d-head">第 <span id="rawVersionNo"></span> 版快照原文（编辑者可见，访客看到的是遮盖视图）</div>
+    <div class="d-body" id="rawVersionBody">加载中…</div>
+    <div class="d-foot">
+      <button id="rawVersionClose" type="button" class="secondary">关闭</button>
     </div>
   </dialog>
 
