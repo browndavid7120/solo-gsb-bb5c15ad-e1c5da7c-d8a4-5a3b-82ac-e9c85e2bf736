@@ -88,6 +88,19 @@ CREATE TABLE IF NOT EXISTS import_batches (
   imported_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ============ 出处遮盖（编辑者按出处原文撤回其公开展示） ============
+-- 只记录“被遮盖的精确出处文本”这一元数据；不修改任何历史快照，也不触碰草稿区
+-- （草稿表触发器不覆盖本表，登记/确认不推进草稿修订号）。
+-- 访客读取已发布版本（最新或指定历史版本）时在读出层按本表把命中的 source
+-- 统一替换为「出处已遮盖」；此后新发布的版本只要含同一文本即自动遮盖。
+-- 持编辑口令查看版本详情、从版本恢复草稿仍使用快照原文。
+CREATE TABLE IF NOT EXISTS redacted_sources (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  source      TEXT NOT NULL UNIQUE,     -- 精确出处原文（逐字符相等才命中）
+  editor      TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ============ 发布区（不可变版本快照） ============
 CREATE TABLE IF NOT EXISTS versions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

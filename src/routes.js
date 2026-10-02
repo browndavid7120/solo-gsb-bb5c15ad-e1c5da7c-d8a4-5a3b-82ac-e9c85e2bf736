@@ -6,6 +6,14 @@ const { parseClaimDate, claimInterval, formatClaimDate } = require('./dates');
 const { evaluateDraft, publishVersion, latestVersionNo, getVersionDetail, getVersionSummary } = require('./publish');
 const { buildRestorePreview, restoreDraftFromVersion, draftRevisionNo } = require('./restore');
 const { buildImportPreview, confirmImport } = require('./bundle');
+const {
+  MAX_SOURCE_LEN,
+  loadRedactedSet,
+  maskVersionDetail,
+  buildRedactionPreview,
+  confirmRedaction,
+  listRedactions,
+} = require('./redaction');
 
 const router = express.Router();
 
@@ -92,7 +100,13 @@ router.get('/api/public/chronicle', (req, res) => {
   if (no === 0) {
     return res.json({ published: false, message: '年表尚未发布任何版本' });
   }
-  res.json({ published: true, currentVersionNo: no, version: getVersionDetail(no) });
+  // 访客侧：已按出处原文登记遮盖的 source 在读出层统一显示为「出处已遮盖」，
+  // 不改动任何历史快照（其余字段与版本号不变）。
+  res.json({
+    published: true,
+    currentVersionNo: no,
+    version: maskVersionDetail(getVersionDetail(no), loadRedactedSet()),
+  });
 });
 
 router.get('/api/public/versions', (req, res) => {
@@ -110,7 +124,8 @@ router.get('/api/public/versions/:no', (req, res) => {
   const no = Number(req.params.no);
   const detail = getVersionDetail(no);
   if (!detail) throw { status: 404, message: `版本 ${req.params.no} 不存在` };
-  res.json({ version: detail });
+  // 指定历史版本同样按已登记清单读时遮盖
+  res.json({ version: maskVersionDetail(detail, loadRedactedSet()) });
 });
 
 // ================= 编辑者接口 =================
@@ -298,6 +313,52 @@ router.get('/api/editor/versions', (req, res) => {
     .all();
   res.json({ currentVersionNo: no, versions: rows });
 });
+
+// 版本详情（编辑者视角）：持编辑口令仍显示快照原文，不做出处遮盖。
+// 与公开的 /api/public/versions/:no（读时遮盖）对应。
+router.get('/api/editor/versions/:no', (req, res) => {
+  const no = Number(req.params.no);
+  if (!Number.isInteger(no) || no < 1) throw badRequest('版本号必须是正整数');
+  const detail = getVersionDetail(no);
+  if (!detail) throw { status: 404, message: `版本 ${req.params.no} 不存在` };
+  res.json({ version: detail });
+});
+
+// ---- 出处遮盖：只读预览，不改数据 ----
+// 请求体 { source }：非空精确出处文本。返回它在全部已发布版本的
+// 事件主张出处与「先于」关系出处中的命中位置、数量，以及预览时最新版本号。
+router.post('/api/editor/redaction-preview', (req, res) => {
+  const source = readRedactionSource(req.body);
+  res.json({ ok: true, ...buildRedactionPreview(source) });
+});
+
+// ---- 出处遮盖：确认登记 ----
+// 请求体 { source, currentVersionNo, editor? }；currentVersionNo 取预览返回值。
+// 确认不修改历史快照、不改草稿；此后访客读取任何已发布版本（含以后新版本）时
+// 命中位置的 source 均显示「出处已遮盖」。重复确认幂等返回已遮盖状态。
+router.post('/api/editor/redaction', (req, res) => {
+  const source = readRedactionSource(req.body);
+  const expectedLatest = Number(req.body && req.body.currentVersionNo);
+  if (!Number.isInteger(expectedLatest) || expectedLatest < 0) {
+    throw badRequest('currentVersionNo 必须是非负整数（取预览时返回的值）');
+  }
+  const editor = optionalString(req.body, 'editor', 200);
+  const result = confirmRedaction({ source, expectedLatestVersionNo: expectedLatest, editor });
+  res.json({ ok: true, ...result });
+});
+
+// 已登记遮盖的出处清单（编辑台展示）
+router.get('/api/editor/redactions', (req, res) => {
+  res.json({ redactions: listRedactions() });
+});
+
+function readRedactionSource(body) {
+  const v = body && body.source;
+  if (typeof v !== 'string') throw badRequest('source（出处原文）必须是字符串');
+  if (v.trim() === '') throw badRequest('source（出处原文）不能为空，需输入要撤回的精确出处文本');
+  if (v.length > MAX_SOURCE_LEN) throw badRequest(`source 长度不能超过 ${MAX_SOURCE_LEN}`);
+  return v;
+}
 
 // ---- 从已发布版本恢复草稿：只读预览，不改数据 ----
 // 列出该版事件、被选时间主张、先于关系，以及当前草稿将被替换的内容。

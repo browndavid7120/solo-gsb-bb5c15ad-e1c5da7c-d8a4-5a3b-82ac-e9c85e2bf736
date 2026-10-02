@@ -34,6 +34,7 @@ let conflictData = null;
 let restorePreview = null; // 恢复草稿预览（确认时提交其中的修订号/最新版本号）
 let bundleParsed = null;   // 解析后的整理包原包（确认时原样提交）
 let bundlePreview = null;  // 导入预览（确认时提交其中的指纹/草稿修订号）
+let redactionPreview = null; // 出处遮盖预览（确认时提交其中的最新版本号）
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -190,6 +191,7 @@ async function loadState() {
   if (changed) localStorage.setItem('selections', JSON.stringify(m));
   render();
   loadVersions();
+  loadRedactionList();
 }
 
 async function loadVersions() {
@@ -203,7 +205,7 @@ async function loadVersions() {
             <button class="secondary" type="button" data-restore-version="${v.versionNo}" style="padding:2px 10px;font-size:13px">预览并恢复草稿</button>
           </div>
           ${v.note ? `<div>${esc(v.note)}</div>` : ''}
-          <div><a href="/api/public/versions/${v.versionNo}" target="_blank">查看该版快照 JSON</a></div>
+          <div><a href="/api/public/versions/${v.versionNo}" target="_blank">查看该版访客视角快照 JSON（出处按遮盖清单显示）</a></div>
         </div>`).join('')
     : '尚无版本。';
 }
@@ -547,6 +549,109 @@ async function confirmBundleImport() {
   }
 }
 
+// ---------- 撤回出处公开展示（预览 → 确认） ----------
+function showRedactionMsg(kind, html) {
+  $('#redactionMsg').innerHTML = `<div class="alert ${kind}">${html}</div>`;
+}
+
+async function loadRedactionList() {
+  try {
+    const data = await api('GET', '/api/editor/redactions');
+    $('#redactionList').innerHTML = data.redactions.length
+      ? data.redactions.map((r) => `
+          <div class="rel-line">
+            <span class="badge prec">已遮盖</span>
+            <span>「${esc(r.source)}」</span>
+            <span class="muted">· ${esc(r.redactedAt.replace('T', ' ').slice(0, 16))} UTC${r.editor ? ' · ' + esc(r.editor) : ''}</span>
+          </div>`).join('')
+      : '<p class="muted">尚无已遮盖出处。</p>';
+  } catch (err) {
+    if (err.message !== 'unauthorized') $('#redactionList').textContent = '清单加载失败。';
+  }
+}
+
+async function previewRedaction() {
+  const source = $('#redactionText').value;
+  if (!source.trim()) { showRedactionMsg('error', '出处原文不能为空，请输入要撤回的<b>精确</b>出处文本。'); return; }
+  try {
+    const data = await api('POST', '/api/editor/redaction-preview', { source });
+    redactionPreview = data;
+    renderRedactionPreview(data);
+    $('#redactionConfirm').disabled = false;
+    $('#redactionDialog').showModal();
+  } catch (err) {
+    if (err.message === 'unauthorized') return;
+    showRedactionMsg('error', esc(err.message));
+  }
+}
+
+function redactionHitsHtml(data) {
+  if (!data.versions.length) return '<p class="muted">在任何已发布版本中都没有精确相等的出处。</p>';
+  return data.versions.map((v) => `
+    <div class="rel-line">
+      <strong>第 ${v.versionNo} 版</strong>
+      <span class="badge">命中 ${v.hitCount} 处</span>
+      ${v.eventClaimHits.map((h) => `<div class="source">事件主张出处：${esc(h.title)}（事件 #${h.eventId}，主张 #${h.claimId}）</div>`).join('')}
+      ${v.relationHits.map((h) => `<div class="source">「先于」关系出处：${esc(h.earlierTitle || '#' + h.earlierEventId)} → ${esc(h.laterTitle || '#' + h.laterEventId)}（关系 #${h.relationId}）</div>`).join('')}
+    </div>`).join('');
+}
+
+function renderRedactionPreview(data) {
+  const c = data.counts;
+  const d = data.draftHits;
+  $('#redactionBody').innerHTML = `
+    ${data.alreadyRedacted
+      ? `<div class="alert warn">该出处已于 ${esc((data.redactedAt || '').replace('T', ' ').slice(0, 16))} UTC 登记遮盖；重复确认不会重复落库，访客侧继续显示「出处已遮盖」。</div>`
+      : ''}
+    <p>将撤回精确出处 <b>「${esc(data.source)}」</b> 的公开展示。
+       <b>不会改写任何历史快照或草稿</b>，仅在访客读出层替换显示文本。</p>
+    <p>
+      <span class="badge prec">命中版本 ${c.versionCount} 个</span>
+      <span class="badge prec">事件主张出处 ${c.eventClaimCount} 处</span>
+      <span class="badge prec">先于关系出处 ${c.relationCount} 处</span>
+      <span class="badge">合计 ${c.hitCount} 处</span>
+    </p>
+    <div style="max-height:240px;overflow:auto">${redactionHitsHtml(data)}</div>
+    <p class="muted" style="margin-top:8px">
+      访客读取最新年表或任一历史版本时，以上命中位置的出处将统一显示为<b>「出处已遮盖」</b>，其余字段及版本号不变；
+      以后发布含同一文本的版本也会自动遮盖。持口令查看版本详情、从版本恢复草稿仍显示 / 使用原文。
+      ${d.claimCount + d.relationCount > 0
+        ? `<br>另：当前草稿中还有 ${d.claimCount} 条主张、${d.relationCount} 条关系使用同一出处（遮盖不动草稿，但它们一旦发布即自动遮盖）。`
+        : ''}
+    </p>
+    <p class="muted">预览时最新版本号：<b>${data.currentVersionNo}</b>。确认前若有新版本发布，将报冲突且不落库，需重新预览。</p>
+    <div id="redactionDialogMsg"></div>`;
+}
+
+async function confirmRedactionAction() {
+  if (!redactionPreview) return;
+  const btn = $('#redactionConfirm');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/editor/redaction', {
+      source: redactionPreview.source,
+      currentVersionNo: redactionPreview.currentVersionNo,
+      editor: store.editor || '匿名编辑',
+    });
+    $('#redactionDialog').close();
+    redactionPreview = null;
+    await loadRedactionList();
+    showRedactionMsg('ok', data.alreadyRedacted
+      ? `该出处此前已登记遮盖：访客侧命中 ${data.counts.hitCount} 处继续显示「出处已遮盖」（幂等，未重复落库）。`
+      : `已登记遮盖：访客侧在 ${data.counts.versionCount} 个版本共 ${data.counts.hitCount} 处显示「出处已遮盖」。历史快照与草稿未被改写。`);
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#redactionDialog').close(); return; }
+    const box = $('#redactionDialogMsg');
+    if (err.status === 409) {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}<br>
+        <span class="muted">未写入任何数据。请关闭本框后重新「预览命中范围」。</span></div>`;
+    } else {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  }
+}
+
 // ---------- 事件委托：增删改 ----------
 async function onClick(e) {
   const t = e.target;
@@ -577,6 +682,10 @@ async function onClick(e) {
   if (t.id === 'btnBundlePreview') return previewBundleImport();
   if (t.id === 'bundleCancel') { $('#bundleDialog').close(); bundleParsed = null; bundlePreview = null; return; }
   if (t.id === 'bundleConfirm') return confirmBundleImport();
+
+  if (t.id === 'btnRedactionPreview') return previewRedaction();
+  if (t.id === 'redactionCancel') { $('#redactionDialog').close(); redactionPreview = null; return; }
+  if (t.id === 'redactionConfirm') return confirmRedactionAction();
 
   const addEvent = t.dataset && t.dataset.addEvent !== undefined;
   if (t.id === 'btnAddEvent') {
